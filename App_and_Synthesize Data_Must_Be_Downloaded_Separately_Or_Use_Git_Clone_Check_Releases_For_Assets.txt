@@ -1,0 +1,1 @@
+App.zip and Synthesize Data.zip must be downloaded separately or obtained via Git clone to work properly. Downloading the entire repository directly will not be usable.
