@@ -1,0 +1,169 @@
+import os
+import sqlite3
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+
+class PenetrationRateAnalyzerTP:
+    def __init__(self, database_path, output_folder, stop_event=None):
+        """Initialize database connection."""
+        if not os.path.exists(database_path):
+            raise FileNotFoundError(f"ERROR: Database not found at {database_path}")
+
+        self.database_path = database_path
+        self.output_folder = output_folder
+
+        if stop_event is None:
+            print("WARNING: stop_event is None, stopping may not work!")
+        self.stop_event = stop_event
+
+        self.conn = sqlite3.connect(database_path)
+
+    def get_lane_readings(self):
+        """Retrieve and aggregate lane volume data by 15-minute intervals, then compute time-of-day averages."""
+        if self.stop_event and self.stop_event.is_set():
+            print("Stopping get_lane_readings")
+            return pd.DataFrame()
+
+        query = """
+        SELECT zone_id, volume, local_time FROM lane_readings
+        WHERE zone_id IN (223305, 197584, 197063, 196740, 196495, 197309, 197088)
+        """
+        df_lane = pd.read_sql(query, self.conn)
+        df_lane["local_time"] = pd.to_datetime(df_lane["local_time"])
+        df_lane["time_bin"] = df_lane["local_time"].dt.floor("15min")
+        df_lane["time_of_day"] = df_lane["time_bin"].dt.time
+        df_lane["weekday"] = df_lane["local_time"].dt.weekday
+        df_lane["is_weekend"] = df_lane["weekday"].apply(lambda x: 1 if x >= 5 else 0)
+
+        # Aggregate total volume per 15-minute interval
+        df_lane = df_lane.groupby(["time_bin", "is_weekend"])["volume"].sum().reset_index()
+
+        # Compute daily time-of-day averages
+        df_lane["time_of_day"] = df_lane["time_bin"].dt.time  # Ensure only time remains
+        df_avg_lane = df_lane.groupby(["time_of_day", "is_weekend"])["volume"].mean().reset_index()
+
+        return df_avg_lane
+
+    def get_traj_volumes(self):
+        """Retrieve and aggregate unique TripId counts by 15-minute intervals, then compute time-of-day averages."""
+        if self.stop_event and self.stop_event.is_set():
+            print("Stopping get_traj_volumes")
+            return pd.DataFrame()
+
+        query = """
+        SELECT TripId, CrossingStartDateLocal FROM trajs
+        """
+        df_traj = pd.read_sql(query, self.conn)
+        df_traj["CrossingStartDateLocal"] = pd.to_datetime(df_traj["CrossingStartDateLocal"])
+        df_traj["time_bin"] = df_traj["CrossingStartDateLocal"].dt.floor("15min")
+        df_traj["time_of_day"] = df_traj["time_bin"].dt.time
+        df_traj["weekday"] = df_traj["CrossingStartDateLocal"].dt.weekday
+        df_traj["is_weekend"] = df_traj["weekday"].apply(lambda x: 1 if x >= 5 else 0)
+
+        # Aggregate unique TripId counts per 15-minute interval
+        df_traj = df_traj.groupby(["time_bin", "is_weekend"])["TripId"].nunique().reset_index()
+
+        # Compute daily time-of-day averages
+        df_traj["time_of_day"] = df_traj["time_bin"].dt.time
+        df_avg_traj = df_traj.groupby(["time_of_day", "is_weekend"])["TripId"].mean().reset_index()
+
+        return df_avg_traj
+
+    def compute_penetration_rate(self, df_lane, df_traj):
+        """Compute penetration rates based on lane readings, map matching, and trajectory data."""
+        if self.stop_event and self.stop_event.is_set():
+            print("Stopping compute_penetration_rate")
+            return
+
+        df_lane = df_lane.rename(columns={"volume": "lane_volume"})
+        df_traj = df_traj.rename(columns={"TripId": "traj_volume"})
+
+        # Merge datasets on time_of_day and is_weekend
+        df_merged = df_lane.merge(df_traj, on=["time_of_day", "is_weekend"], how="left")
+
+        # Compute penetration rates
+        df_merged["traj_penetration_rate"] = df_merged["traj_volume"] / df_merged["lane_volume"]
+
+        return df_merged
+
+    def plot_penetration_rate(self, df_penetration):
+        """Plot penetration rates over time-of-day for weekdays and weekends separately."""
+        output_dir = os.path.join(self.output_folder, "advanced_data_fusion", "penetration_rate_tp")
+        os.makedirs(output_dir, exist_ok=True)
+
+        for is_weekend, label in [(0, "Weekday"), (1, "Weekend")]:
+            if self.stop_event and self.stop_event.is_set():
+                print(f"Stopping during plotting {label}")
+                return
+
+            df_filtered = df_penetration[df_penetration["is_weekend"] == is_weekend].copy()
+
+            if df_filtered.empty:
+                print(f"No data available for {label}, skipping plot.")
+                continue
+
+            df_filtered["time_bin"] = df_filtered["time_of_day"]
+            df_filtered["time_of_day"] = pd.to_datetime(df_filtered["time_bin"], format="%H:%M:%S")
+
+            plt.figure(figsize=(12, 8))
+            plt.xlabel("Time of Day", fontsize=18)
+            plt.ylabel("Penetration Rate", fontsize=18)
+            plt.title(f"Penetration Rate - {label}", fontsize=18)
+
+            plt.plot(df_filtered["time_of_day"], df_filtered["traj_penetration_rate"], linestyle="--", linewidth=3,
+                     color="#E90E01", label="Trip Path")
+
+            plt.legend(fontsize=18)
+            plt.grid(True)
+            plt.xticks(fontsize=18)
+            plt.yticks(fontsize=18)
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+            plt.tight_layout()
+            # plt.show()
+
+            filename = f"penetration_rate_{label.lower()}_tp.png"
+            filepath = os.path.join(output_dir, filename)
+            plt.savefig(filepath, dpi=300)
+            plt.close()
+
+    def run(self):
+        """Execute penetration rate analysis."""
+        if self.stop_event and self.stop_event.is_set():
+            return
+        df_lane = self.get_lane_readings()
+
+        if self.stop_event and self.stop_event.is_set():
+            return
+        df_traj = self.get_traj_volumes()
+
+        if self.stop_event and self.stop_event.is_set():
+            return
+        df_penetration = self.compute_penetration_rate(df_lane, df_traj)
+        # print(df_penetration)
+
+        # Save penetration rate data
+        if self.stop_event and self.stop_event.is_set():
+            return
+        penetration_rate_dir = os.path.join(self.output_folder, "advanced_data_fusion", "penetration_rate_tp")
+        os.makedirs(penetration_rate_dir, exist_ok=True)
+
+        penetration_rate_path = os.path.join(penetration_rate_dir, "penetration_rates_tp.csv")
+        df_penetration.to_csv(penetration_rate_path, encoding="utf-8-sig")
+
+        if self.stop_event and self.stop_event.is_set():
+            return
+        self.plot_penetration_rate(df_penetration)
+
+        self.conn.close()
+        print("Penetration Rate Analysis Completed.")
+
+
+if __name__ == "__main__":
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
+    DEFAULT_OUTPUT_FOLDER = os.path.join(PROJECT_ROOT, "data", "output")
+    DEFAULT_DATABASE_PATH = os.path.join(PROJECT_ROOT, "data", "output", "database", "unified_database.db")
+
+    penetrationrate_analyzer_tp = PenetrationRateAnalyzerTP(DEFAULT_DATABASE_PATH, DEFAULT_OUTPUT_FOLDER)
+    penetrationrate_analyzer_tp.run()
